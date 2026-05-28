@@ -71,9 +71,7 @@ streamlit run ai_investment_advisor.py
 - [ ] 支持多账户持仓对比
 - [ ] 部署到 Streamlit Cloud 提供在线演示
 
-## 📄 开源协议
 
-MIT License
 
 ## 👤 作者
 
