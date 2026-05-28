@@ -45,7 +45,7 @@ streamlit run ai_investment_advisor.py
 - **数据处理**：Pandas, NumPy, Requests
 - **数据源**：AkShare, 东方财富公开接口
 - **AI 模型**：通义千问（qwen-plus / qwen-max），兼容 OpenAI SDK
-- **语言**：Python 3.9+
+- **语言**：Python 3.14
 
 ## 📂 文件结构
 
