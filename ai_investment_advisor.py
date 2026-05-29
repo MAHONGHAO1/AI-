@@ -16,63 +16,6 @@ from pathlib import Path
 from typing import Any
 
 
-REQUIRED_PACKAGES = {
-    "streamlit": "streamlit",
-    "pandas": "pandas",
-    "numpy": "numpy",
-    "requests": "requests",
-    "plotly": "plotly",
-    "openai": "openai",
-    "tabulate": "tabulate",
-}
-
-
-def ensure_packages() -> None:
-    missing = [pip_name for import_name, pip_name in REQUIRED_PACKAGES.items() if importlib.util.find_spec(import_name) is None]
-    if not missing:
-        return
-
-    base_cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--prefer-binary",
-        "--timeout",
-        "120",
-        "--retries",
-        "5",
-        "--progress-bar",
-        "off",
-        *missing,
-    ]
-    mirror_cmd = [
-        *base_cmd,
-        "-i",
-        "https://pypi.tuna.tsinghua.edu.cn/simple",
-        "--trusted-host",
-        "pypi.tuna.tsinghua.edu.cn",
-    ]
-
-    print(f"检测到缺失依赖：{missing}，开始安装...", flush=True)
-    for label, cmd in [("默认 PyPI", base_cmd), ("清华 PyPI 镜像", mirror_cmd)]:
-        try:
-            print(f"正在通过{label}安装依赖...", flush=True)
-            subprocess.check_call(cmd)
-            return
-        except subprocess.CalledProcessError as exc:
-            print(f"{label}安装失败：{exc}", flush=True)
-
-    raise RuntimeError(
-        "依赖自动安装失败。请在 PowerShell 手动运行：\n"
-        "python -m pip install streamlit pandas numpy requests plotly openai lxml tabulate "
-        "-i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn --timeout 120"
-    )
-
-
-ensure_packages()
-
-
 def bootstrap_streamlit() -> None:
     """允许用户用 python 直接运行脚本时自动切换到 streamlit run。"""
     if os.getenv("STREAMLIT_BOOTSTRAPPED") == "1":
@@ -146,6 +89,26 @@ TYPE_KEYWORDS = {
 }
 
 UI_NOTICES: set[str] = set()
+
+AI_DISCLAIMER = "以上内容由人工智能生成，不构成投资建议，请独立决策。"
+COMPLIANCE_DISCLOSURE = "本工具仅用于学习交流，不提供任何形式的投资建议或交易执行。基金投资有风险，请根据自身风险承受能力谨慎决策。"
+
+SCORE_DIMENSIONS = ["收益能力", "风险控制", "风险调整收益", "稳定性", "相对排名"]
+DEFAULT_SCORE_WEIGHTS = {
+    "收益能力": 0.30,
+    "风险控制": 0.25,
+    "风险调整收益": 0.25,
+    "稳定性": 0.10,
+    "相对排名": 0.10,
+}
+
+BENCHMARKS = {
+    "沪深300": {"secid": "1.000300", "name": "沪深300"},
+    "科创50": {"secid": "1.000688", "name": "科创50"},
+    "纳斯达克100": {"secid": "100.NDX100", "name": "纳斯达克100"},
+    "中证银行": {"secid": "0.399986", "name": "中证银行"},
+    "中证有色金属": {"secid": "1.000819", "name": "中证有色金属"},
+}
 
 
 def default_holdings() -> list[dict[str, Any]]:
@@ -236,6 +199,11 @@ def holdings_to_map(holdings: list[dict[str, Any]]) -> dict[str, dict[str, float
     }
 
 
+def default_snapshot_date() -> str:
+    """示例持仓来自 2026-05-28 左右的账户快照。"""
+    return "2026-05-28"
+
+
 def inject_css() -> None:
     st.markdown(
         """
@@ -256,10 +224,28 @@ def inject_css() -> None:
             background: rgba(15,23,42,.72);
         }
         .small-muted { color: #94a3b8; font-size: 13px; }
+        .compliance-footer {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 999;
+            background: rgba(15, 23, 42, .96);
+            border-top: 1px solid rgba(148,163,184,.30);
+            color: #cbd5e1;
+            padding: 8px 18px;
+            font-size: 12px;
+            text-align: center;
+        }
+        .block-container { padding-bottom: 3.8rem; }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_compliance_footer() -> None:
+    st.markdown(f'<div class="compliance-footer">{COMPLIANCE_DISCLOSURE}</div>', unsafe_allow_html=True)
 
 
 def to_float(value: Any) -> float:
@@ -304,6 +290,18 @@ def classify_fund(name: str) -> str:
     return "其他"
 
 
+def benchmark_for_fund(name: str, fund_type: str) -> str:
+    if fund_type == "纳斯达克" or "纳斯达克" in name:
+        return "纳斯达克100"
+    if fund_type == "银行" or "银行" in name:
+        return "中证银行"
+    if fund_type == "有色金属" or "有色" in name or "金属" in name:
+        return "中证有色金属"
+    if "科创" in name:
+        return "科创50"
+    return "沪深300"
+
+
 def show_notice_once(key: str, message: str, level: str = "warning") -> None:
     """在 Streamlit 界面和终端各提示一次，避免重复刷屏。"""
     if key in UI_NOTICES:
@@ -331,18 +329,26 @@ def fetch_nav_with_akshare(code: str) -> pd.DataFrame:
         show_notice_once("akshare_import_error", f"AkShare 导入失败，已自动跳过：{exc}", "warning")
         raise ValueError(f"AkShare 导入失败：{exc}") from exc
 
-    df = ak.fund_open_fund_info_em(fund=code, indicator="单位净值走势")
+    try:
+        df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势", period="成立来")
+    except TypeError:
+        df = ak.fund_open_fund_info_em(fund=code, indicator="单位净值走势")
     if df is None or df.empty:
         raise ValueError("AkShare 返回空数据")
     date_col = next((c for c in df.columns if "日期" in str(c) or str(c).lower() == "date"), None)
-    nav_col = next((c for c in df.columns if "单位净值" in str(c) or "净值" in str(c)), None)
+    nav_col = next((c for c in df.columns if "单位净值" in str(c)), None)
+    if nav_col is None:
+        nav_col = next((c for c in df.columns if "净值" in str(c) and "日期" not in str(c)), None)
     if date_col is None or nav_col is None:
         raise ValueError(f"AkShare 字段不符合预期：{list(df.columns)}")
+    acc_nav_col = next((c for c in df.columns if "累计净值" in str(c)), None)
     out = pd.DataFrame({"date": df[date_col].map(safe_date), "nav": df[nav_col].map(to_float)})
+    if acc_nav_col is not None:
+        out["acc_nav"] = df[acc_nav_col].map(to_float)
     out = out.dropna(subset=["date", "nav"]).sort_values("date").reset_index(drop=True)
     if out.empty:
         raise ValueError("AkShare 清洗后无有效净值")
-    return out
+    return validate_nav_history(out, code, "AkShare")
 
 
 def fetch_nav_with_eastmoney(code: str) -> pd.DataFrame:
@@ -408,10 +414,35 @@ def fetch_nav_with_eastmoney(code: str) -> pd.DataFrame:
     nav_col = next((c for c in df.columns if "单位净值" in str(c)), None)
     if date_col is None or nav_col is None:
         raise ValueError(f"东方财富字段不符合预期：{list(df.columns)}")
+    acc_nav_col = next((c for c in df.columns if "累计净值" in str(c)), None)
     out = pd.DataFrame({"date": df[date_col].map(safe_date), "nav": df[nav_col].map(to_float)})
+    if acc_nav_col is not None:
+        out["acc_nav"] = df[acc_nav_col].map(to_float)
     out = out.dropna(subset=["date", "nav"]).drop_duplicates("date").sort_values("date").reset_index(drop=True)
     if out.empty:
         raise ValueError("东方财富清洗后无有效净值")
+    return validate_nav_history(out, code, "东方财富")
+
+
+def validate_nav_history(df: pd.DataFrame, code: str, source: str) -> pd.DataFrame:
+    out = df.dropna(subset=["date", "nav"]).drop_duplicates("date").sort_values("date").reset_index(drop=True)
+    if out.empty:
+        raise ValueError(f"{source} 清洗后无有效净值")
+    invalid_nav = out[(out["nav"] <= 0) | ~np.isfinite(out["nav"])]
+    if not invalid_nav.empty:
+        raise ValueError(f"{source} 净值存在非正数或无效值")
+    if "acc_nav" in out.columns:
+        out["acc_nav"] = out["acc_nav"].map(to_float)
+
+    daily_returns = out["nav"].pct_change()
+    abnormal = out[daily_returns.abs() > 0.15]
+    if not abnormal.empty:
+        sample_dates = "、".join(abnormal["date"].dt.strftime("%Y-%m-%d").head(3).tolist())
+        show_notice_once(
+            f"nav_abnormal_{source}_{code}_{sample_dates}",
+            f"{source} 净值合理性预警：{code} 出现单日波动超过 15%（{sample_dates}）。已继续展示，请核对分红、拆分或数据源。",
+            "warning",
+        )
     return out
 
 
@@ -429,12 +460,62 @@ def make_mock_nav(code: str) -> pd.DataFrame:
 
 def fetch_nav_history(code: str) -> tuple[pd.DataFrame, str, str]:
     errors = []
-    for source, fetcher in [("AkShare", fetch_nav_with_akshare), ("东方财富", fetch_nav_with_eastmoney)]:
+    for source, fetcher in [("东方财富", fetch_nav_with_eastmoney), ("AkShare", fetch_nav_with_akshare)]:
         try:
             return fetcher(code), source, ""
         except Exception as exc:
             errors.append(f"{source}: {exc}")
     return make_mock_nav(code), "模拟数据", "；".join(errors)
+
+
+def fetch_benchmark_history(benchmark_key: str) -> pd.DataFrame:
+    benchmark = BENCHMARKS.get(benchmark_key, BENCHMARKS["沪深300"])
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=460)).strftime("%Y%m%d")
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": benchmark["secid"],
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56",
+        "klt": "101",
+        "fqt": "1",
+        "beg": start_date,
+        "end": end_date,
+    }
+    resp = requests.get(url, params=params, timeout=8, headers={"User-Agent": "Mozilla/5.0 fund-report-streamlit"})
+    resp.raise_for_status()
+    payload = resp.json()
+    data = payload.get("data") or {}
+    klines = data.get("klines") or []
+    if not klines:
+        raise ValueError(f"{benchmark['name']} 基准行情为空")
+
+    rows = []
+    for item in klines:
+        parts = str(item).split(",")
+        if len(parts) < 3:
+            continue
+        rows.append({"date": safe_date(parts[0]), "nav": to_float(parts[2])})
+    out = pd.DataFrame(rows).dropna(subset=["date", "nav"]).drop_duplicates("date").sort_values("date").reset_index(drop=True)
+    if out.empty:
+        raise ValueError(f"{benchmark['name']} 基准行情清洗后为空")
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_benchmark_history(benchmark_key: str, refresh_token: int = 0) -> tuple[pd.DataFrame, str]:
+    _ = refresh_token
+    try:
+        return fetch_benchmark_history(benchmark_key), benchmark_key
+    except Exception as exc:
+        if benchmark_key != "沪深300":
+            show_notice_once(
+                f"benchmark_fallback_{benchmark_key}",
+                f"{benchmark_key} 基准行情加载失败，已回退到沪深300：{exc}",
+                "warning",
+            )
+            return fetch_benchmark_history("沪深300"), "沪深300"
+        raise
 
 
 def calc_period_return(df: pd.DataFrame, days: int) -> float:
@@ -451,6 +532,117 @@ def calc_period_return(df: pd.DataFrame, days: int) -> float:
     return (latest["nav"] / base_nav - 1) * 100
 
 
+def nav_on_or_before(df: pd.DataFrame, target_date: Any) -> tuple[float, pd.Timestamp | None]:
+    if df.empty:
+        return float("nan"), None
+    target_ts = pd.to_datetime(target_date)
+    candidates = df[df["date"] <= target_ts]
+    if candidates.empty:
+        return float("nan"), None
+    row = candidates.iloc[-1]
+    return float(row["nav"]), pd.to_datetime(row["date"])
+
+
+def update_holding_by_nav(
+    holding: dict[str, float],
+    nav_df: pd.DataFrame,
+    snapshot_date: str,
+    auto_update: bool,
+) -> dict[str, Any]:
+    amount = float(holding.get("amount", 0.0))
+    hold_ret = float(holding.get("hold_ret", 0.0))
+    cum_profit = float(holding.get("cum_profit", 0.0))
+    result = {
+        "amount": amount,
+        "hold_ret": hold_ret,
+        "cum_profit": cum_profit,
+        "snapshot_amount": amount,
+        "snapshot_hold_ret": hold_ret,
+        "snapshot_cum_profit": cum_profit,
+        "snapshot_date": snapshot_date,
+        "snapshot_nav": float("nan"),
+        "snapshot_nav_date": "",
+        "holding_auto_updated": False,
+        "holding_update_note": "未开启持仓自动更新。",
+    }
+    if not auto_update or amount <= 0 or nav_df.empty:
+        return result
+
+    snapshot_nav, nav_date = nav_on_or_before(nav_df, snapshot_date)
+    latest_nav = float(nav_df.iloc[-1]["nav"])
+    if math.isnan(snapshot_nav) or snapshot_nav <= 0 or latest_nav <= 0:
+        result["holding_update_note"] = "找不到快照日之前的有效净值，已保留原始持仓。"
+        return result
+
+    nav_ratio = latest_nav / snapshot_nav
+    current_amount = amount * nav_ratio
+    cost_basis = amount / (1 + hold_ret / 100.0) if hold_ret > -99.99 else float("nan")
+    current_hold_ret = (current_amount / cost_basis - 1) * 100 if cost_basis and not math.isnan(cost_basis) else hold_ret
+    current_cum_profit = cum_profit + (current_amount - amount)
+
+    result.update(
+        {
+            "amount": current_amount,
+            "hold_ret": current_hold_ret,
+            "cum_profit": current_cum_profit,
+            "snapshot_nav": snapshot_nav,
+            "snapshot_nav_date": nav_date.strftime("%Y-%m-%d") if nav_date is not None else "",
+            "holding_auto_updated": True,
+            "holding_update_note": f"按 {result['snapshot_nav_date']} 净值 {snapshot_nav:.4f} 至最新净值 {latest_nav:.4f} 自动更新。",
+        }
+    )
+    return result
+
+
+def calc_period_return_until(df: pd.DataFrame, end_date: Any, days: int) -> float:
+    if df.empty:
+        return float("nan")
+    end_ts = pd.to_datetime(end_date)
+    history = df[df["date"] <= end_ts].copy()
+    if history.empty:
+        return float("nan")
+    latest = history.iloc[-1]
+    target_date = latest["date"] - pd.Timedelta(days=days)
+    candidates = history[history["date"] <= target_date]
+    if candidates.empty:
+        return float("nan")
+    base_nav = candidates.iloc[-1]["nav"]
+    if base_nav <= 0:
+        return float("nan")
+    return (latest["nav"] / base_nav - 1) * 100
+
+
+def calc_forward_return(df: pd.DataFrame, start_date: Any, days: int) -> float:
+    if df.empty:
+        return float("nan")
+    start_ts = pd.to_datetime(start_date)
+    start_candidates = df[df["date"] <= start_ts]
+    end_candidates = df[df["date"] <= start_ts + pd.Timedelta(days=days)]
+    if start_candidates.empty or end_candidates.empty:
+        return float("nan")
+    start_row = start_candidates.iloc[-1]
+    end_row = end_candidates.iloc[-1]
+    if end_row["date"] <= start_row["date"] or start_row["nav"] <= 0:
+        return float("nan")
+    return (end_row["nav"] / start_row["nav"] - 1) * 100
+
+
+def calc_excess_return(fund_df: pd.DataFrame, benchmark_df: pd.DataFrame, days: int) -> float:
+    fund_ret = calc_period_return(fund_df, days)
+    bench_ret = calc_period_return_until(benchmark_df, fund_df.iloc[-1]["date"], days) if not fund_df.empty else float("nan")
+    if math.isnan(fund_ret) or math.isnan(bench_ret):
+        return float("nan")
+    return fund_ret - bench_ret
+
+
+def recent_history_until(df: pd.DataFrame, end_date: Any, days: int = 365) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    end_ts = pd.to_datetime(end_date)
+    start_ts = end_ts - pd.Timedelta(days=days)
+    return df[(df["date"] >= start_ts) & (df["date"] <= end_ts)].copy()
+
+
 def calc_max_drawdown(df: pd.DataFrame) -> float:
     if df.empty:
         return float("nan")
@@ -461,6 +653,116 @@ def calc_max_drawdown(df: pd.DataFrame) -> float:
     rolling_max = recent["nav"].cummax()
     drawdown = recent["nav"] / rolling_max - 1
     return float(drawdown.min() * 100)
+
+
+def calc_max_drawdown_until(df: pd.DataFrame, end_date: Any, days: int = 365) -> float:
+    recent = recent_history_until(df, end_date, days)
+    if len(recent) < 2:
+        return float("nan")
+    rolling_max = recent["nav"].cummax()
+    drawdown = recent["nav"] / rolling_max - 1
+    return float(drawdown.min() * 100)
+
+
+def calc_annual_volatility(df: pd.DataFrame) -> float:
+    if df.empty:
+        return float("nan")
+    one_year_ago = df.iloc[-1]["date"] - pd.Timedelta(days=365)
+    recent = df[df["date"] >= one_year_ago].copy()
+    returns = recent["nav"].pct_change().dropna()
+    if len(returns) < 30:
+        return float("nan")
+    return float(returns.std() * np.sqrt(252) * 100)
+
+
+def calc_annual_volatility_until(df: pd.DataFrame, end_date: Any, days: int = 365) -> float:
+    recent = recent_history_until(df, end_date, days)
+    returns = recent["nav"].pct_change().dropna() if not recent.empty else pd.Series(dtype="float64")
+    if len(returns) < 30:
+        return float("nan")
+    return float(returns.std() * np.sqrt(252) * 100)
+
+
+def calc_drawdown_recovery_days(df: pd.DataFrame) -> float:
+    if df.empty:
+        return float("nan")
+    one_year_ago = df.iloc[-1]["date"] - pd.Timedelta(days=365)
+    recent = df[df["date"] >= one_year_ago].copy().reset_index(drop=True)
+    if len(recent) < 2:
+        return float("nan")
+    rolling_max = recent["nav"].cummax()
+    drawdown = recent["nav"] / rolling_max - 1
+    trough_idx = int(drawdown.idxmin())
+    if drawdown.iloc[trough_idx] >= 0:
+        return 0.0
+    peak_nav = float(rolling_max.iloc[trough_idx])
+    recovered = recent[(recent.index > trough_idx) & (recent["nav"] >= peak_nav)]
+    end_date = recovered.iloc[0]["date"] if not recovered.empty else recent.iloc[-1]["date"]
+    return float((end_date - recent.iloc[trough_idx]["date"]).days)
+
+
+def calc_drawdown_recovery_days_until(df: pd.DataFrame, end_date: Any, days: int = 365) -> float:
+    recent = recent_history_until(df, end_date, days).reset_index(drop=True)
+    if len(recent) < 2:
+        return float("nan")
+    rolling_max = recent["nav"].cummax()
+    drawdown = recent["nav"] / rolling_max - 1
+    trough_idx = int(drawdown.idxmin())
+    if drawdown.iloc[trough_idx] >= 0:
+        return 0.0
+    peak_nav = float(rolling_max.iloc[trough_idx])
+    recovered = recent[(recent.index > trough_idx) & (recent["nav"] >= peak_nav)]
+    recovery_end = recovered.iloc[0]["date"] if not recovered.empty else recent.iloc[-1]["date"]
+    return float((recovery_end - recent.iloc[trough_idx]["date"]).days)
+
+
+def calc_sharpe_until(df: pd.DataFrame, end_date: Any, days: int = 365) -> float:
+    recent = recent_history_until(df, end_date, days)
+    returns = recent["nav"].pct_change().dropna() if not recent.empty else pd.Series(dtype="float64")
+    if len(returns) < 30 or returns.std() == 0:
+        return float("nan")
+    return float((returns.mean() / returns.std()) * np.sqrt(252))
+
+
+def build_score_backtest_samples(nav_df: pd.DataFrame, benchmark_df: pd.DataFrame) -> list[dict[str, Any]]:
+    if nav_df.empty:
+        return []
+    df = nav_df.copy().sort_values("date").reset_index(drop=True)
+    latest_date = df.iloc[-1]["date"]
+    cutoff = latest_date - pd.Timedelta(days=35)
+    candidates = df[df["date"] <= cutoff].copy()
+    if candidates.empty:
+        return []
+    candidates["month"] = candidates["date"].dt.to_period("M")
+    as_of_dates = candidates.groupby("month").tail(1)["date"].tail(12).tolist()
+
+    samples = []
+    for as_of in as_of_dates:
+        fund_ret_90 = calc_period_return_until(df, as_of, 90)
+        benchmark_ret_90 = calc_period_return_until(benchmark_df, as_of, 90) if benchmark_df is not None and not benchmark_df.empty else float("nan")
+        excess_ret_90 = fund_ret_90 - benchmark_ret_90 if not math.isnan(fund_ret_90) and not math.isnan(benchmark_ret_90) else fund_ret_90
+        mdd = calc_max_drawdown_until(df, as_of, 180)
+        sharpe = calc_sharpe_until(df, as_of, 180)
+        volatility = calc_annual_volatility_until(df, as_of, 180)
+        recovery_days = calc_drawdown_recovery_days_until(df, as_of, 180)
+        calmar = fund_ret_90 / abs(mdd) if not math.isnan(fund_ret_90) and not math.isnan(mdd) and abs(mdd) > 0 else float("nan")
+        risk_adjusted = sharpe if not math.isnan(sharpe) else calmar
+        stability = -volatility - (recovery_days / 10.0 if not math.isnan(recovery_days) else 0.0) if not math.isnan(volatility) else float("nan")
+        target = calc_forward_return(df, as_of, 30)
+        if math.isnan(target):
+            continue
+        samples.append(
+            {
+                "as_of": pd.to_datetime(as_of).strftime("%Y-%m-%d"),
+                "target": target,
+                "收益能力": excess_ret_90,
+                "风险控制": -abs(mdd) if not math.isnan(mdd) else float("nan"),
+                "风险调整收益": risk_adjusted,
+                "稳定性": stability,
+                "相对排名": excess_ret_90,
+            }
+        )
+    return samples
 
 
 def calc_sharpe(df: pd.DataFrame) -> float:
@@ -480,16 +782,73 @@ def clamp(value: float, low: float = 0.0, high: float = 10.0) -> float:
     return min(high, max(low, value))
 
 
-def score_higher_better(value: float, zero_at: float, ten_at: float, default: float = 5.0) -> float:
-    if math.isnan(value) or ten_at == zero_at:
-        return default
-    return clamp((value - zero_at) / (ten_at - zero_at) * 10)
+def percentile_score(values: list[float], higher_better: bool = True) -> list[float]:
+    series = pd.Series([to_float(value) for value in values], dtype="float64")
+    valid = series.dropna()
+    if valid.empty:
+        return [5.0 for _ in values]
+    if len(valid) == 1:
+        return [5.0 if not math.isnan(to_float(value)) else 5.0 for value in values]
+
+    ranks = series.rank(method="average", pct=True, ascending=higher_better)
+    scores = ranks.map(lambda x: (float(x) - (1.0 / len(valid))) / (1.0 - (1.0 / len(valid))) * 10.0 if not math.isnan(x) else 5.0)
+    return [round(clamp(float(score), 0.0, 10.0), 1) for score in scores.tolist()]
 
 
-def score_lower_better(value: float, ten_at: float, zero_at: float, default: float = 5.0) -> float:
-    if math.isnan(value) or zero_at == ten_at:
-        return default
-    return clamp((zero_at - value) / (zero_at - ten_at) * 10)
+def normalize_weights(raw_weights: dict[str, float]) -> dict[str, float]:
+    clean = {dimension: max(0.0, float(raw_weights.get(dimension, 0.0))) for dimension in SCORE_DIMENSIONS}
+    total = sum(clean.values())
+    if total <= 0:
+        return DEFAULT_SCORE_WEIGHTS.copy()
+    return {dimension: clean[dimension] / total for dimension in SCORE_DIMENSIONS}
+
+
+def spearman_corr(left: pd.Series, right: pd.Series) -> float:
+    joined = pd.concat([pd.to_numeric(left, errors="coerce"), pd.to_numeric(right, errors="coerce")], axis=1).dropna()
+    if len(joined) < 3 or joined.iloc[:, 0].nunique() < 2 or joined.iloc[:, 1].nunique() < 2:
+        return float("nan")
+    left_rank = joined.iloc[:, 0].rank(method="average")
+    right_rank = joined.iloc[:, 1].rank(method="average")
+    left_std = float(left_rank.std(ddof=0))
+    right_std = float(right_rank.std(ddof=0))
+    if left_std == 0 or right_std == 0:
+        return float("nan")
+    return float(np.corrcoef(left_rank, right_rank)[0, 1])
+
+
+def calculate_predictive_weights(rows: list[dict[str, Any]], dimension_raw_values: dict[str, list[float]]) -> tuple[dict[str, float], str]:
+    _ = dimension_raw_values
+    samples = []
+    for row in rows:
+        for sample in row.get("评分回测样本", []) or []:
+            samples.append(sample)
+
+    raw_weights = {}
+    if len(samples) >= 12:
+        sample_df = pd.DataFrame(samples)
+        for dimension in SCORE_DIMENSIONS:
+            joined = sample_df[[dimension, "target"]].apply(pd.to_numeric, errors="coerce").dropna()
+            if len(joined) < 12 or joined[dimension].nunique() < 3 or joined["target"].nunique() < 3:
+                raw_weights[dimension] = 0.0
+                continue
+            ic = spearman_corr(joined[dimension], joined["target"])
+            if math.isnan(ic):
+                raw_weights[dimension] = 0.0
+                continue
+            monthly_ics = []
+            for _, group in sample_df.groupby("as_of"):
+                mini = group[[dimension, "target"]].apply(pd.to_numeric, errors="coerce").dropna()
+                if len(mini) >= 3 and mini[dimension].nunique() > 1 and mini["target"].nunique() > 1:
+                    mini_ic = spearman_corr(mini[dimension], mini["target"])
+                    if not math.isnan(mini_ic):
+                        monthly_ics.append(mini_ic)
+            ir = abs(ic) if len(monthly_ics) < 2 else abs(float(np.mean(monthly_ics)) / (float(np.std(monthly_ics, ddof=1)) + 1e-9))
+            raw_weights[dimension] = abs(float(ic)) * max(ir, 0.01)
+
+    if sum(raw_weights.values()) > 0:
+        return normalize_weights(raw_weights), "权重来自历史回测样本 IC/IR"
+
+    return DEFAULT_SCORE_WEIGHTS.copy(), "历史回测样本不足，使用默认审慎权重"
 
 
 def grade_from_score(total_score: float) -> str:
@@ -504,75 +863,71 @@ def grade_from_score(total_score: float) -> str:
     return "一星"
 
 
-def calculate_composite_score(fund_data: dict) -> dict:
-    ret_1m = to_float(fund_data.get("近1月收益率"))
-    ret_3m = to_float(fund_data.get("近3月收益率"))
-    ret_1y = to_float(fund_data.get("近1年收益率"))
-    mdd = to_float(fund_data.get("近1年最大回撤"))
-    sharpe = to_float(fund_data.get("近1年夏普比率"))
-    relative_score = to_float(fund_data.get("相对排名分", 5.0))
-
-    ret_1y_score = score_higher_better(ret_1y, zero_at=-20.0, ten_at=20.0)
-    ret_1m_score = score_higher_better(ret_1m, zero_at=-10.0, ten_at=10.0)
-    return_score = ret_1y_score * 0.7 + ret_1m_score * 0.3
-    risk_score = score_higher_better(mdd, zero_at=-30.0, ten_at=-5.0)
-    sharpe_score = score_higher_better(sharpe, zero_at=1.0, ten_at=2.0, default=0.0)
-
-    if math.isnan(ret_1y) or math.isnan(mdd) or abs(mdd) <= 0:
-        calmar_score = 0.0
-    else:
-        calmar_score = score_higher_better(ret_1y / abs(mdd), zero_at=0.0, ten_at=5.0, default=0.0)
-    risk_adjusted_score = (sharpe_score + calmar_score) / 2
-
-    if math.isnan(ret_3m) or math.isnan(ret_1y):
-        stability_score = 5.0
-    else:
-        stability_score = score_lower_better(abs(ret_3m - ret_1y), ten_at=0.0, zero_at=30.0)
-
-    dimension_scores = {
-        "收益能力": round(return_score, 1),
-        "风险控制": round(risk_score, 1),
-        "风险调整收益": round(risk_adjusted_score, 1),
-        "稳定性": round(stability_score, 1),
-        "相对排名": round(clamp(relative_score), 1),
-    }
-    total_score = round(
-        dimension_scores["收益能力"] * 0.30
-        + dimension_scores["风险控制"] * 0.25
-        + dimension_scores["风险调整收益"] * 0.25
-        + dimension_scores["稳定性"] * 0.10
-        + dimension_scores["相对排名"] * 0.10,
-        1,
-    )
-    return {"total_score": total_score, "dimension_scores": dimension_scores, "grade": grade_from_score(total_score)}
-
-
-def relative_rank_score(position: int, total: int) -> float:
-    if total <= 1:
-        return 10.0
-    percentile = position / (total - 1)
-    if percentile <= 0.2:
-        return 10.0
-    if percentile >= 0.8:
-        return 2.0
-    return round(10.0 - ((percentile - 0.2) / 0.6) * 8.0, 1)
-
-
 def apply_composite_scores(rows: list[dict[str, Any]]) -> None:
-    for row in rows:
-        row["相对排名分"] = 5.0
-        row["_预评分"] = calculate_composite_score(row)["total_score"]
+    if not rows:
+        return
 
-    ranked_rows = sorted(rows, key=lambda item: item["_预评分"], reverse=True)
-    for position, row in enumerate(ranked_rows):
-        row["相对排名分"] = relative_rank_score(position, len(ranked_rows))
-        result = calculate_composite_score(row)
-        row["综合评分(0-10)"] = result["total_score"]
-        row["晨星评级"] = result["grade"]
-        row["维度分数"] = result["dimension_scores"]
-        for dimension, score in result["dimension_scores"].items():
+    calmar_values = []
+    for row in rows:
+        ret_1y = to_float(row.get("近1年收益率"))
+        mdd = to_float(row.get("近1年最大回撤"))
+        if math.isnan(ret_1y) or math.isnan(mdd) or abs(mdd) <= 0:
+            calmar_values.append(float("nan"))
+        else:
+            calmar_values.append(ret_1y / abs(mdd))
+
+    return_scores = percentile_score(
+        [
+            to_float(row.get("近1年超额收益率"))
+            if not math.isnan(to_float(row.get("近1年超额收益率")))
+            else to_float(row.get("近1年收益率"))
+            for row in rows
+        ],
+        higher_better=True,
+    )
+    risk_scores = percentile_score([abs(to_float(row.get("近1年最大回撤"))) for row in rows], higher_better=False)
+    sharpe_scores = percentile_score([to_float(row.get("近1年夏普比率")) for row in rows], higher_better=True)
+    calmar_scores = percentile_score(calmar_values, higher_better=True)
+    volatility_scores = percentile_score([to_float(row.get("近1年年化波动率")) for row in rows], higher_better=False)
+    recovery_scores = percentile_score([to_float(row.get("最大回撤修复天数")) for row in rows], higher_better=False)
+
+    preliminary_values = []
+    dimension_raw_values = {dimension: [] for dimension in SCORE_DIMENSIONS}
+    for index, row in enumerate(rows):
+        risk_adjusted = round((sharpe_scores[index] + calmar_scores[index]) / 2, 1)
+        stability = round((volatility_scores[index] + recovery_scores[index]) / 2, 1)
+        preliminary = (
+            return_scores[index] * DEFAULT_SCORE_WEIGHTS["收益能力"]
+            + risk_scores[index] * DEFAULT_SCORE_WEIGHTS["风险控制"]
+            + risk_adjusted * DEFAULT_SCORE_WEIGHTS["风险调整收益"]
+            + stability * DEFAULT_SCORE_WEIGHTS["稳定性"]
+        )
+        preliminary_values.append(preliminary)
+        dimension_raw_values["收益能力"].append(to_float(row.get("近1年超额收益率")))
+        dimension_raw_values["风险控制"].append(-abs(to_float(row.get("近1年最大回撤"))))
+        dimension_raw_values["风险调整收益"].append(risk_adjusted)
+        dimension_raw_values["稳定性"].append(stability)
+
+    relative_scores = percentile_score(preliminary_values, higher_better=True)
+    dimension_raw_values["相对排名"] = preliminary_values
+    weights, weight_method = calculate_predictive_weights(rows, dimension_raw_values)
+
+    for index, row in enumerate(rows):
+        dimension_scores = {
+            "收益能力": return_scores[index],
+            "风险控制": risk_scores[index],
+            "风险调整收益": round((sharpe_scores[index] + calmar_scores[index]) / 2, 1),
+            "稳定性": round((volatility_scores[index] + recovery_scores[index]) / 2, 1),
+            "相对排名": relative_scores[index],
+        }
+        total_score = round(sum(dimension_scores[dimension] * weights[dimension] for dimension in SCORE_DIMENSIONS), 1)
+        row["综合评分(0-10)"] = total_score
+        row["晨星评级"] = grade_from_score(total_score)
+        row["维度分数"] = dimension_scores
+        row["评分权重"] = {dimension: round(weights[dimension], 3) for dimension in SCORE_DIMENSIONS}
+        row["评分方法"] = f"基金池百分位评分；{weight_method}"
+        for dimension, score in dimension_scores.items():
             row[f"{dimension}得分"] = score
-        row.pop("_预评分", None)
 
 
 def mock_short_advice(name: str, ret_1y: float, mdd: float, hold_ret: float) -> str:
@@ -632,6 +987,48 @@ def mock_detailed_advice(row: dict[str, Any]) -> str:
     )
 
 
+def ensure_ai_disclaimer(text: str) -> str:
+    clean = str(text or "").strip()
+    if AI_DISCLAIMER in clean:
+        return clean
+    return f"{clean}\n\n{AI_DISCLAIMER}" if clean else AI_DISCLAIMER
+
+
+def advice_numbers_are_consistent(text: str, row: dict[str, Any], tolerance: float = 0.35) -> bool:
+    checks = [
+        (r"近\s*1\s*月\s*收益率?\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1月收益率"),
+        (r"近\s*3\s*月\s*收益率?\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近3月收益率"),
+        (r"近\s*1\s*年\s*收益率?\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1年收益率"),
+        (r"近\s*1\s*年\s*超额收益率?\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1年超额收益率"),
+        (r"超额收益率?\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1年超额收益率"),
+        (r"近\s*1\s*年\s*最大回撤\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1年最大回撤"),
+        (r"最大回撤\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1年最大回撤"),
+        (r"年化波动率?\s*[为是:]?\s*([+-]?\d+(?:\.\d+)?)\s*%", "近1年年化波动率"),
+    ]
+    for pattern, field in checks:
+        matches = re.findall(pattern, text)
+        if not matches:
+            continue
+        actual = to_float(row.get(field))
+        if math.isnan(actual):
+            continue
+        if not any(abs(float(match) - actual) <= tolerance for match in matches):
+            return False
+    return True
+
+
+def validated_advice(short_text: str, detail_text: str, row: dict[str, Any], fallback_short: str, fallback_detail: str) -> tuple[str, str]:
+    merged = f"{short_text}\n{detail_text}"
+    if not advice_numbers_are_consistent(merged, row):
+        show_notice_once(
+            f"ai_advice_metric_mismatch_{row['代码']}",
+            f"{row['基金名称']} 的 AI 建议引用数据与表格不一致，已改用本地校验文案。",
+            "warning",
+        )
+        return fallback_short, ensure_ai_disclaimer(fallback_detail)
+    return short_text or fallback_short, ensure_ai_disclaimer(detail_text or fallback_detail)
+
+
 def parse_qwen_advice_pair(text: str) -> tuple[str, str]:
     """解析一次 AI 调用返回的简短和详细建议。"""
     short_match = re.search(r"【简短建议】\s*(.*?)(?=【详细建议】|$)", text, re.S)
@@ -641,9 +1038,22 @@ def parse_qwen_advice_pair(text: str) -> tuple[str, str]:
     return short_text, detail_text
 
 
+def get_dashscope_api_key() -> str:
+    session_key = st.session_state.get("dashscope_api_key", "").strip()
+    if session_key:
+        return session_key
+    env_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    try:
+        return str(st.secrets.get("DASHSCOPE_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
 def call_qwen_advice_pair(row: dict[str, Any]) -> tuple[str, str]:
     """一次通义千问调用同时生成简短建议和详细建议，减少 API 调用次数。"""
-    api_key = st.session_state.get("dashscope_api_key") or os.getenv("DASHSCOPE_API_KEY")
+    api_key = get_dashscope_api_key()
     mock_short = mock_short_advice(
         row["基金名称"],
         to_float(row["近1年收益率"]),
@@ -652,7 +1062,7 @@ def call_qwen_advice_pair(row: dict[str, Any]) -> tuple[str, str]:
     )
     mock_detail = mock_detailed_advice(row)
     if not api_key:
-        return mock_short, mock_detail
+        return mock_short, ensure_ai_disclaimer(mock_detail)
 
     try:
         client = OpenAI(
@@ -669,7 +1079,11 @@ def call_qwen_advice_pair(row: dict[str, Any]) -> tuple[str, str]:
 近1月收益率：{fmt_pct(to_float(row["近1月收益率"]))}
 近3月收益率：{fmt_pct(to_float(row["近3月收益率"]))}
 近1年收益率：{fmt_pct(to_float(row["近1年收益率"]))}
+近1年基准收益率（{row.get("比较基准", "沪深300")}）：{fmt_pct(to_float(row.get("近1年基准收益率")))}
+近1年超额收益率：{fmt_pct(to_float(row.get("近1年超额收益率")))}
 近1年最大回撤：{fmt_pct(to_float(row["近1年最大回撤"]))}
+近1年年化波动率：{fmt_pct(to_float(row.get("近1年年化波动率")))}
+最大回撤修复天数：{fmt_num(to_float(row.get("最大回撤修复天数")), 0)} 天
 夏普比率：{fmt_num(to_float(row["近1年夏普比率"]))}
 综合评分：{row["综合评分(0-10)"]}
 晨星评级：{row["晨星评级"]}
@@ -685,6 +1099,7 @@ def call_qwen_advice_pair(row: dict[str, Any]) -> tuple[str, str]:
 【具体操作建议】明确给出继续持有、部分止盈比例、逢低加仓或止损清仓。
 【风险提示】列出2-3个当前主要风险点。
 【适合人群】说明保守型/平衡型/激进型及持有期限建议。
+禁止编造或改写上述数值；如引用收益率、回撤、波动率，必须与输入数据完全一致。
 """.strip()
         response = client.chat.completions.create(
             model=model,
@@ -698,40 +1113,70 @@ def call_qwen_advice_pair(row: dict[str, Any]) -> tuple[str, str]:
         text = response.choices[0].message.content.strip()
         if text:
             short_text, detail_text = parse_qwen_advice_pair(text)
-            return short_text or mock_short, detail_text or mock_detail
+            return validated_advice(short_text, detail_text, row, mock_short, mock_detail)
     except Exception as exc:
         show_notice_once("qwen_call_failed", f"通义千问调用失败，已使用本地 mock 建议：{exc}", "warning")
 
-    return mock_short, mock_detail
+    return mock_short, ensure_ai_disclaimer(mock_detail)
 
 
-def analyze_fund(fund: dict[str, str], holdings: dict[str, dict[str, float]]) -> dict[str, Any]:
+def analyze_fund(
+    fund: dict[str, str],
+    holdings: dict[str, dict[str, float]],
+    refresh_token: int = 0,
+    snapshot_date: str = "",
+    auto_update_holdings: bool = False,
+) -> dict[str, Any]:
     code = fund["code"]
     name = fund["name"]
+    fund_type = classify_fund(name)
+    benchmark_key = benchmark_for_fund(name, fund_type)
     nav_df, source, error_msg = fetch_nav_history(code)
+    benchmark_df, benchmark_used = load_benchmark_history(benchmark_key, refresh_token)
     latest = nav_df.iloc[-1]
     ret_1m = calc_period_return(nav_df, 30)
     ret_3m = calc_period_return(nav_df, 90)
     ret_1y = calc_period_return(nav_df, 365)
+    benchmark_ret_1y = calc_period_return_until(benchmark_df, latest["date"], 365)
+    excess_ret_1m = calc_excess_return(nav_df, benchmark_df, 30)
+    excess_ret_1y = calc_excess_return(nav_df, benchmark_df, 365)
     mdd = calc_max_drawdown(nav_df)
     sharpe = calc_sharpe(nav_df)
+    volatility = calc_annual_volatility(nav_df)
+    recovery_days = calc_drawdown_recovery_days(nav_df)
     holding = holdings.get(code, {"amount": 0.0, "hold_ret": 0.0, "cum_profit": 0.0})
+    updated_holding = update_holding_by_nav(holding, nav_df, snapshot_date, auto_update_holdings)
     return {
         "基金名称": name,
         "代码": code,
-        "基金类型": classify_fund(name),
+        "基金类型": fund_type,
+        "比较基准": benchmark_used,
         "最新净值日期": latest["date"].strftime("%Y-%m-%d"),
         "单位净值": float(latest["nav"]),
         "近1月收益率": ret_1m,
         "近3月收益率": ret_3m,
         "近1年收益率": ret_1y,
+        "近1年基准收益率": benchmark_ret_1y,
+        "近1月超额收益率": excess_ret_1m,
+        "近1年超额收益率": excess_ret_1y,
         "近1年最大回撤": mdd,
         "近1年夏普比率": sharpe,
-        "当前持有金额": float(holding.get("amount", 0.0)),
-        "当前持有收益率": float(holding.get("hold_ret", 0.0)),
-        "累计收益": float(holding.get("cum_profit", 0.0)),
+        "近1年年化波动率": volatility,
+        "最大回撤修复天数": recovery_days,
+        "当前持有金额": float(updated_holding["amount"]),
+        "当前持有收益率": float(updated_holding["hold_ret"]),
+        "累计收益": float(updated_holding["cum_profit"]),
+        "快照持有金额": float(updated_holding["snapshot_amount"]),
+        "快照持有收益率": float(updated_holding["snapshot_hold_ret"]),
+        "快照累计收益": float(updated_holding["snapshot_cum_profit"]),
+        "持仓快照日期": updated_holding["snapshot_date"],
+        "快照净值日期": updated_holding["snapshot_nav_date"],
+        "快照单位净值": float(updated_holding["snapshot_nav"]),
+        "持仓已自动更新": bool(updated_holding["holding_auto_updated"]),
+        "持仓更新说明": updated_holding["holding_update_note"],
         "数据来源": source,
         "错误信息": error_msg,
+        "评分回测样本": build_score_backtest_samples(nav_df, benchmark_df),
     }
 
 
@@ -740,38 +1185,63 @@ def analyze_fund_with_mock(
     nav_df: pd.DataFrame,
     error_msg: str,
     holdings: dict[str, dict[str, float]],
+    snapshot_date: str = "",
+    auto_update_holdings: bool = False,
 ) -> dict[str, Any]:
     code = fund["code"]
     name = fund["name"]
+    fund_type = classify_fund(name)
     latest = nav_df.iloc[-1]
     ret_1m = calc_period_return(nav_df, 30)
     ret_3m = calc_period_return(nav_df, 90)
     ret_1y = calc_period_return(nav_df, 365)
     mdd = calc_max_drawdown(nav_df)
     sharpe = calc_sharpe(nav_df)
+    volatility = calc_annual_volatility(nav_df)
+    recovery_days = calc_drawdown_recovery_days(nav_df)
     holding = holdings.get(code, {"amount": 0.0, "hold_ret": 0.0, "cum_profit": 0.0})
+    updated_holding = update_holding_by_nav(holding, nav_df, snapshot_date, auto_update_holdings)
     return {
         "基金名称": name,
         "代码": code,
-        "基金类型": classify_fund(name),
+        "基金类型": fund_type,
+        "比较基准": "沪深300",
         "最新净值日期": latest["date"].strftime("%Y-%m-%d"),
         "单位净值": float(latest["nav"]),
         "近1月收益率": ret_1m,
         "近3月收益率": ret_3m,
         "近1年收益率": ret_1y,
+        "近1年基准收益率": float("nan"),
+        "近1月超额收益率": float("nan"),
+        "近1年超额收益率": float("nan"),
         "近1年最大回撤": mdd,
         "近1年夏普比率": sharpe,
-        "当前持有金额": float(holding.get("amount", 0.0)),
-        "当前持有收益率": float(holding.get("hold_ret", 0.0)),
-        "累计收益": float(holding.get("cum_profit", 0.0)),
+        "近1年年化波动率": volatility,
+        "最大回撤修复天数": recovery_days,
+        "当前持有金额": float(updated_holding["amount"]),
+        "当前持有收益率": float(updated_holding["hold_ret"]),
+        "累计收益": float(updated_holding["cum_profit"]),
+        "快照持有金额": float(updated_holding["snapshot_amount"]),
+        "快照持有收益率": float(updated_holding["snapshot_hold_ret"]),
+        "快照累计收益": float(updated_holding["snapshot_cum_profit"]),
+        "持仓快照日期": updated_holding["snapshot_date"],
+        "快照净值日期": updated_holding["snapshot_nav_date"],
+        "快照单位净值": float(updated_holding["snapshot_nav"]),
+        "持仓已自动更新": bool(updated_holding["holding_auto_updated"]),
+        "持仓更新说明": updated_holding["holding_update_note"],
         "数据来源": "模拟数据",
         "错误信息": error_msg,
+        "评分回测样本": [],
     }
 
 
 @st.cache_data(ttl=86400, show_spinner="数据加载中，请稍候...")
-def load_data(refresh_token: int = 0, holdings_json: str = "") -> list[dict[str, Any]]:
-    _ = refresh_token
+def load_data(
+    refresh_token: int = 0,
+    holdings_json: str = "",
+    snapshot_date: str = "",
+    auto_update_holdings: bool = False,
+) -> list[dict[str, Any]]:
     try:
         holdings_list = normalize_holdings(json.loads(holdings_json or "[]"))
     except Exception:
@@ -781,9 +1251,18 @@ def load_data(refresh_token: int = 0, holdings_json: str = "") -> list[dict[str,
     for holding_item in holdings_list:
         fund = {"code": holding_item["code"], "name": holding_item["name"]}
         try:
-            rows.append(analyze_fund(fund, holdings))
+            rows.append(analyze_fund(fund, holdings, refresh_token, snapshot_date, auto_update_holdings))
         except Exception as exc:
-            rows.append(analyze_fund_with_mock(fund, make_mock_nav(fund["code"]), str(exc), holdings))
+            rows.append(
+                analyze_fund_with_mock(
+                    fund,
+                    make_mock_nav(fund["code"]),
+                    str(exc),
+                    holdings,
+                    snapshot_date,
+                    auto_update_holdings,
+                )
+            )
 
     apply_composite_scores(rows)
     for row in rows:
@@ -814,6 +1293,8 @@ def apply_manual_overrides(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         row.update(overrides[code])
         row["数据来源"] = "手动覆盖"
+        row["评分回测样本"] = []
+        row["持仓更新说明"] = "手动覆盖后未重新推算持仓快照。"
 
     apply_composite_scores(adjusted_rows)
     for row in adjusted_rows:
@@ -825,7 +1306,7 @@ def apply_manual_overrides(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 to_float(row["近1年最大回撤"]),
                 to_float(row["当前持有收益率"]),
             )
-            row["详细AI建议"] = mock_detailed_advice(row)
+            row["详细AI建议"] = ensure_ai_disclaimer(mock_detailed_advice(row))
     return adjusted_rows
 
 
@@ -960,17 +1441,27 @@ def build_table_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
             "基金类型",
             "当前持有金额",
             "当前持有收益率",
+            "快照持有金额",
+            "持仓快照日期",
             "近1月收益率",
             "近1年收益率",
+            "近1年超额收益率",
             "综合评分(0-10)",
             "晨星评级",
+            "数据来源",
             "AI建议",
         ]
     ].copy()
     table_df["代码"] = table_df["代码"].astype(str).str.zfill(6)
-    for col in ["当前持有金额", "当前持有收益率", "近1月收益率", "近1年收益率", "综合评分(0-10)"]:
+    for col in ["当前持有金额", "当前持有收益率", "快照持有金额", "近1月收益率", "近1年收益率", "近1年超额收益率", "综合评分(0-10)"]:
         table_df[col] = table_df[col].map(lambda x: round(to_float(x), 2))
     return table_df
+
+
+def highlight_mock_rows(row: pd.Series) -> list[str]:
+    if row.get("数据来源") == "模拟数据":
+        return ["background-color: #7f1d1d; color: #fee2e2;" for _ in row]
+    return ["" for _ in row]
 
 
 def portfolio_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1079,14 +1570,29 @@ def load_nav_for_backtest(code: str, refresh_token: int = 0) -> tuple[pd.DataFra
     return fetch_nav_history(code)
 
 
-def simulate_monthly_investment(nav_df: pd.DataFrame, months: int, monthly_amount: float) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
+def simulate_monthly_investment(
+    nav_df: pd.DataFrame,
+    months: int,
+    monthly_amount: float,
+    subscription_fee_rate: float = 0.0,
+    redemption_fee_rate: float = 0.0,
+    dividend_mode: str = "红利再投",
+) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
     """模拟过去 N 个月每月定投固定金额，并按最新净值估算当前收益。"""
     if nav_df.empty:
         return {}, pd.DataFrame(), pd.DataFrame()
 
     df = nav_df.copy().sort_values("date").reset_index(drop=True)
+    price_col = "nav"
+    dividend_note = "现金分红：按单位净值口径估算，未额外计入历史现金分红。"
+    if dividend_mode == "红利再投" and "acc_nav" in df.columns and df["acc_nav"].dropna().nunique() > 1:
+        price_col = "acc_nav"
+        dividend_note = "红利再投：使用累计净值口径近似估算分红再投资效果。"
+    elif dividend_mode == "红利再投":
+        dividend_note = "红利再投：当前数据缺少累计净值，已回退为单位净值口径。"
+
     latest_date = df.iloc[-1]["date"]
-    latest_nav = float(df.iloc[-1]["nav"])
+    latest_nav = float(df.iloc[-1][price_col])
     start_date = latest_date - pd.DateOffset(months=months)
     recent = df[df["date"] >= start_date].copy()
     if recent.empty:
@@ -1095,7 +1601,9 @@ def simulate_monthly_investment(nav_df: pd.DataFrame, months: int, monthly_amoun
     recent["month"] = recent["date"].dt.to_period("M")
     purchases = recent.groupby("month", as_index=False).first().tail(months).copy()
     purchases["投入金额"] = float(monthly_amount)
-    purchases["买入份额"] = purchases["投入金额"] / purchases["nav"]
+    purchases["申购费"] = purchases["投入金额"] * max(0.0, subscription_fee_rate) / 100.0
+    purchases["净申购金额"] = purchases["投入金额"] - purchases["申购费"]
+    purchases["买入份额"] = purchases["净申购金额"] / purchases[price_col]
     purchases["当前价值"] = purchases["买入份额"] * latest_nav
     purchases["当前盈亏"] = purchases["当前价值"] - purchases["投入金额"]
 
@@ -1108,22 +1616,30 @@ def simulate_monthly_investment(nav_df: pd.DataFrame, months: int, monthly_amoun
         invested = float(active["投入金额"].sum())
         shares = float(active["买入份额"].sum())
         invested_values.append(invested)
-        market_values.append(shares * float(day["nav"]))
+        market_values.append(shares * float(day[price_col]))
     curve["累计投入"] = invested_values
     curve["组合当前价值"] = market_values
     curve["收益率"] = np.where(curve["累计投入"] > 0, curve["组合当前价值"] / curve["累计投入"] - 1, 0.0)
 
     total_invested = float(purchases["投入金额"].sum())
+    total_subscription_fee = float(purchases["申购费"].sum())
     total_shares = float(purchases["买入份额"].sum())
-    current_value = total_shares * latest_nav
+    gross_value = total_shares * latest_nav
+    redemption_fee = gross_value * max(0.0, redemption_fee_rate) / 100.0
+    current_value = gross_value - redemption_fee
     profit = current_value - total_invested
     profit_rate = profit / total_invested * 100 if total_invested > 0 else 0.0
     summary = {
         "total_invested": total_invested,
+        "total_subscription_fee": total_subscription_fee,
+        "redemption_fee": redemption_fee,
+        "gross_value": gross_value,
         "current_value": current_value,
         "profit": profit,
         "profit_rate": profit_rate,
         "latest_nav": latest_nav,
+        "price_col": price_col,
+        "dividend_note": dividend_note,
     }
     return summary, purchases, curve
 
@@ -1141,11 +1657,22 @@ def render_backtest_simulator(rows: list[dict[str, Any]], selected_row: dict[str
     fund_label = c1.selectbox("选择回测基金", labels, index=labels.index(default_label), key="backtest_fund")
     months = c2.number_input("回测月份", min_value=1, max_value=24, value=3, step=1)
     monthly_amount = c3.number_input("每月定投金额", min_value=10.0, max_value=100000.0, value=100.0, step=10.0)
+    f1, f2, f3 = st.columns([1, 1, 1])
+    subscription_fee_rate = f1.number_input("申购费率(%)", min_value=0.0, max_value=5.0, value=0.0, step=0.05, format="%.2f")
+    redemption_fee_rate = f2.number_input("赎回费率(%)", min_value=0.0, max_value=5.0, value=0.0, step=0.05, format="%.2f")
+    dividend_mode = f3.selectbox("分红方式", ["红利再投", "现金分红"], index=0)
 
     fund = options[fund_label]
     try:
         nav_df, source, err = load_nav_for_backtest(str(fund["代码"]).zfill(6), st.session_state.refresh_token)
-        summary, purchases, curve = simulate_monthly_investment(nav_df, int(months), float(monthly_amount))
+        summary, purchases, curve = simulate_monthly_investment(
+            nav_df,
+            int(months),
+            float(monthly_amount),
+            float(subscription_fee_rate),
+            float(redemption_fee_rate),
+            dividend_mode,
+        )
     except Exception as exc:
         st.warning(f"回测数据加载失败：{exc}")
         return
@@ -1159,9 +1686,13 @@ def render_backtest_simulator(rows: list[dict[str, Any]], selected_row: dict[str
     m2.metric("当前价值", f"{summary['current_value']:.2f}")
     m3.metric("当前盈亏", f"{summary['profit']:.2f}")
     m4.metric("收益率", f"{summary['profit_rate']:.2f}%")
-    st.caption(f"回测数据来源：{source}。假设每月第一个可用净值日买入，不考虑申购费、赎回费、分红和税费。")
+    st.caption(
+        f"回测数据来源：{source}。假设每月第一个可用净值日买入，已扣除申购费 {subscription_fee_rate:.2f}% "
+        f"和赎回费 {redemption_fee_rate:.2f}%。{summary['dividend_note']} 历史回测不代表未来表现。"
+    )
     if err:
         st.caption(f"数据提示：{err}")
+    st.caption(f"费用估算：申购费合计 {summary['total_subscription_fee']:.2f}，期末赎回费 {summary['redemption_fee']:.2f}。")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=curve["date"], y=curve["累计投入"], mode="lines", name="累计投入"))
@@ -1169,7 +1700,10 @@ def render_backtest_simulator(rows: list[dict[str, Any]], selected_row: dict[str
     fig.update_layout(height=380, title="定投组合价值曲线", margin=dict(l=30, r=20, t=60, b=40))
     st.plotly_chart(fig, use_container_width=True)
 
-    purchase_table = purchases[["date", "nav", "投入金额", "买入份额", "当前价值", "当前盈亏"]].copy()
+    purchase_cols = ["date", "nav", "投入金额", "申购费", "净申购金额", "买入份额", "当前价值", "当前盈亏"]
+    if "acc_nav" in purchases.columns:
+        purchase_cols.insert(2, "acc_nav")
+    purchase_table = purchases[purchase_cols].copy()
     purchase_table["date"] = purchase_table["date"].dt.strftime("%Y-%m-%d")
     st.dataframe(purchase_table, use_container_width=True, hide_index=True)
 
@@ -1195,9 +1729,21 @@ def build_markdown_report(rows: list[dict[str, Any]]) -> str:
     bottom3 = sorted_df.tail(3).sort_values("综合评分(0-10)")
 
     table_df = df[
-        ["基金名称", "代码", "近1月收益率", "近1年收益率", "近1年最大回撤", "综合评分(0-10)", "晨星评级", "AI建议"]
+        [
+            "基金名称",
+            "代码",
+            "比较基准",
+            "近1月收益率",
+            "近1年收益率",
+            "近1年超额收益率",
+            "近1年最大回撤",
+            "综合评分(0-10)",
+            "晨星评级",
+            "数据来源",
+            "AI建议",
+        ]
     ].copy()
-    for col in ["近1月收益率", "近1年收益率", "近1年最大回撤"]:
+    for col in ["近1月收益率", "近1年收益率", "近1年超额收益率", "近1年最大回撤"]:
         table_df[col] = table_df[col].map(lambda x: fmt_pct(to_float(x)))
 
     detail_df = df[
@@ -1206,8 +1752,18 @@ def build_markdown_report(rows: list[dict[str, Any]]) -> str:
             "代码",
             "最新净值日期",
             "单位净值",
+            "持仓快照日期",
+            "快照净值日期",
+            "快照单位净值",
+            "快照持有金额",
+            "快照持有收益率",
             "近3月收益率",
+            "近1年基准收益率",
+            "近1月超额收益率",
+            "近1年超额收益率",
             "近1年夏普比率",
+            "近1年年化波动率",
+            "最大回撤修复天数",
             "当前持有金额",
             "当前持有收益率",
             "累计收益",
@@ -1220,8 +1776,14 @@ def build_markdown_report(rows: list[dict[str, Any]]) -> str:
         ]
     ].copy()
     detail_df["单位净值"] = detail_df["单位净值"].map(lambda x: fmt_num(to_float(x), 4))
+    detail_df["快照单位净值"] = detail_df["快照单位净值"].map(lambda x: fmt_num(to_float(x), 4))
+    detail_df["快照持有金额"] = detail_df["快照持有金额"].map(lambda x: f"{to_float(x):.2f}")
+    detail_df["快照持有收益率"] = detail_df["快照持有收益率"].map(lambda x: f"{to_float(x):.2f}%")
     detail_df["近3月收益率"] = detail_df["近3月收益率"].map(lambda x: fmt_pct(to_float(x)))
+    for col in ["近1年基准收益率", "近1月超额收益率", "近1年超额收益率", "近1年年化波动率"]:
+        detail_df[col] = detail_df[col].map(lambda x: fmt_pct(to_float(x)))
     detail_df["近1年夏普比率"] = detail_df["近1年夏普比率"].map(lambda x: fmt_num(to_float(x), 2))
+    detail_df["最大回撤修复天数"] = detail_df["最大回撤修复天数"].map(lambda x: fmt_num(to_float(x), 0))
     detail_df["当前持有金额"] = detail_df["当前持有金额"].map(lambda x: f"{to_float(x):.2f}")
     detail_df["当前持有收益率"] = detail_df["当前持有收益率"].map(lambda x: f"{to_float(x):.2f}%")
     detail_df["累计收益"] = detail_df["累计收益"].map(lambda x: f"{to_float(x):.2f}")
@@ -1239,7 +1801,7 @@ def build_markdown_report(rows: list[dict[str, Any]]) -> str:
 
 生成时间：{generated_at}
 
-> 免责声明：本报告由公开净值数据、简化量化规则和 AI 文本生成，不能替代专业投顾意见；脚本不执行任何交易操作。
+> 免责声明：{COMPLIANCE_DISCLOSURE}
 {warning_text}
 ## 核心评分与建议
 
@@ -1253,9 +1815,9 @@ def build_markdown_report(rows: list[dict[str, Any]]) -> str:
 
 综合评分最低的 3 只基金：{bottom_text}。
 
-多维度评分说明：收益能力按近 1 年收益率和近 1 月收益率综合计算，其中近 1 年收益率按 -20% 到 20% 映射到 0-10 分，超过 20% 按 10 分封顶；风险控制按近 1 年最大回撤评分，风险调整收益由夏普比率和卡玛比率共同决定，稳定性衡量近 3 月与近 1 年收益率差异，相对排名依据本次基金池内综合预评分百分位给分。
+多维度评分说明：各指标均在当前基金池内转换为 0-10 百分位分。收益能力优先使用基金近 1 年收益率减同期比较基准收益率后的超额收益；风险控制使用最大回撤百分位；风险调整收益由夏普比率和卡玛比率百分位共同决定；稳定性使用年化波动率和最大回撤修复天数；相对排名依据维度预评分百分位给分。
 
-权重说明：收益能力 30%，风险控制 25%，风险调整收益 25%，稳定性 10%，相对排名 10%；总分保留一位小数，并映射为五星至一星评级。
+权重说明：系统会根据历史样本 IC/IR 估计维度权重，历史样本不足时回退默认权重（收益能力 30%，风险控制 25%，风险调整收益 25%，稳定性 10%，相对排名 10%）。总分保留一位小数，并映射为五星至一星评级。
 """
 
 
@@ -1268,11 +1830,13 @@ def build_html_report(rows: list[dict[str, Any]]) -> str:
 
     table_rows = "\n".join(
         f"""
-        <tr>
+        <tr class="{'mock-row' if row.get("数据来源") == "模拟数据" else ''}">
           <td>{row["基金名称"]}</td><td>{str(row["代码"]).zfill(6)}</td><td>{row["基金类型"]}</td>
+          <td>{row.get("比较基准", "沪深300")}</td>
           <td>{fmt_pct(to_float(row["近1月收益率"]))}</td><td>{fmt_pct(to_float(row["近1年收益率"]))}</td>
+          <td>{fmt_pct(to_float(row.get("近1年超额收益率")))}</td>
           <td>{fmt_pct(to_float(row["近1年最大回撤"]))}</td><td>{row["综合评分(0-10)"]}</td>
-          <td>{row["晨星评级"]}</td><td>{row["AI建议"]}</td>
+          <td>{row["晨星评级"]}</td><td>{row["数据来源"]}</td><td>{row["AI建议"]}</td>
         </tr>
         """
         for row in sorted_rows
@@ -1294,6 +1858,10 @@ def build_html_report(rows: list[dict[str, Any]]) -> str:
         """
         for row in sorted_rows
     )
+    mock_warning = ""
+    if any(row.get("数据来源") == "模拟数据" for row in sorted_rows):
+        names = "、".join(row["基金名称"] for row in sorted_rows if row.get("数据来源") == "模拟数据")
+        mock_warning = f'<div class="warning">注意：以下基金使用模拟数据，仅用于流程验证：{names}</div>'
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -1306,11 +1874,13 @@ def build_html_report(rows: list[dict[str, Any]]) -> str:
     main {{ max-width: 1280px; margin: 0 auto; padding: 28px 18px 48px; }}
     h1 {{ margin: 0 0 6px; font-size: 30px; }}
     .muted {{ color:#94a3b8; }}
+    .disclaimer, .warning {{ border:1px solid rgba(248,113,113,.45); background:#450a0a; color:#fee2e2; border-radius:8px; padding:12px; margin:14px 0; }}
     .grid {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:14px; margin:22px 0; }}
     .metric, .card, .chart, .table-wrap {{ border:1px solid rgba(148,163,184,.24); border-radius:10px; background:#111827; padding:16px; }}
     .metric p {{ margin:0; color:#94a3b8; font-size:13px; }} .metric b {{ display:block; margin-top:8px; font-size:20px; color:#f8fafc; }}
     table {{ width:100%; border-collapse: collapse; font-size:13px; }} th, td {{ border-bottom:1px solid #334155; padding:10px; text-align:left; vertical-align:top; }}
     th {{ color:#cbd5e1; }} .chart {{ margin:16px 0; background:white; color:#0f172a; }}
+    .mock-row td {{ background:#7f1d1d; color:#fee2e2; }}
     .card {{ margin:14px 0; }} .card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }}
     .card h3 {{ margin:0; }} .card p {{ margin:4px 0 0; color:#94a3b8; }} .dims {{ display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }}
     .dims span {{ background:#1f2937; border-radius:6px; padding:6px 8px; font-size:12px; }}
@@ -1323,17 +1893,19 @@ def build_html_report(rows: list[dict[str, Any]]) -> str:
 <main>
   <h1>基金组合可视化报告</h1>
   <div class="muted">生成时间：{summary["generated_at"]}</div>
+  <div class="disclaimer">{COMPLIANCE_DISCLOSURE}</div>
+  {mock_warning}
   <div class="grid">
     <div class="metric"><p>总持仓金额</p><b>{summary["total_amount"]:.2f}</b></div>
     <div class="metric"><p>总累计收益</p><b>{summary["total_profit"]:.2f}</b></div>
     <div class="metric"><p>最高评分基金</p><b>{summary["best"]["基金名称"]}</b><span>{summary["best"]["综合评分(0-10)"]} 分</span></div>
     <div class="metric"><p>最低风险基金</p><b>{summary["lowest_risk"]["基金名称"]}</b><span>风险控制 {summary["lowest_risk"]["风险控制得分"]}</span></div>
   </div>
-  <section class="table-wrap"><h2>数据表格</h2><table><thead><tr><th>基金</th><th>代码</th><th>类型</th><th>近1月</th><th>近1年</th><th>回撤</th><th>评分</th><th>评级</th><th>建议</th></tr></thead><tbody>{table_rows}</tbody></table></section>
+  <section class="table-wrap"><h2>数据表格</h2><table><thead><tr><th>基金</th><th>代码</th><th>类型</th><th>基准</th><th>近1月</th><th>近1年</th><th>超额</th><th>回撤</th><th>评分</th><th>评级</th><th>来源</th><th>建议</th></tr></thead><tbody>{table_rows}</tbody></table></section>
   <section class="chart">{bar_html}</section>
   <section class="chart">{scatter_html}</section>
   <section class="chart">{radar_html}</section>
-  <p class="muted">说明：收益能力中的近 1 年收益率按 -20% 到 20% 映射评分，超过 20% 按 10 分封顶；雷达图仅展示综合评分前 3 名和后 3 名，避免曲线过度叠加。</p>
+  <p class="muted">说明：指标在当前基金池内转换为 0-10 百分位分；收益能力优先使用相对比较基准的超额收益，权重按历史样本 IC/IR 估计，样本不足时回退默认权重。历史回测不代表未来表现。</p>
   <h2>详细 AI 建议</h2>
   {advice_blocks}
 </main>
@@ -1350,8 +1922,55 @@ def render_metrics(rows: list[dict[str, Any]]) -> None:
     c4.metric("最低风险基金", summary["lowest_risk"]["基金名称"], f"风险控制 {summary['lowest_risk']['风险控制得分']}")
 
 
+def require_mock_data_confirmation(rows: list[dict[str, Any]]) -> bool:
+    mock_rows = [row for row in rows if row.get("数据来源") == "模拟数据"]
+    if not mock_rows:
+        return True
+
+    codes = ",".join(sorted(str(row["代码"]).zfill(6) for row in mock_rows))
+    confirm_key = f"mock_data_confirmed_{codes}"
+    st.error(
+        "检测到以下基金使用模拟数据："
+        + "、".join(f"{row['基金名称']}（{str(row['代码']).zfill(6)}）" for row in mock_rows)
+        + "。模拟数据只能用于界面流程验证，不能用于判断基金表现。"
+    )
+    confirmed = st.checkbox("我已了解上述基金使用模拟数据，仍继续查看结果", key=confirm_key)
+    if not confirmed:
+        st.stop()
+        return False
+    return True
+
+
+def render_holding_snapshot_settings() -> tuple[str, bool]:
+    with st.sidebar.expander("持仓快照自动更新", expanded=True):
+        auto_update = st.checkbox(
+            "按最新净值自动更新持仓金额",
+            value=bool(st.session_state.get("auto_update_holdings", True)),
+            help="用快照日净值和最新净值比例，自动推算当前持有金额、持有收益率和累计收益。",
+        )
+        snapshot_value = st.session_state.get("holdings_snapshot_date", default_snapshot_date())
+        snapshot_date = st.date_input(
+            "持仓数据日期",
+            value=pd.to_datetime(snapshot_value).date(),
+            help="填写你录入这些持有金额和收益率时对应的账户日期，例如 2026-05-27 或 2026-05-28。",
+        )
+        snapshot_date_text = snapshot_date.strftime("%Y-%m-%d")
+        if (
+            auto_update != st.session_state.get("auto_update_holdings")
+            or snapshot_date_text != st.session_state.get("holdings_snapshot_date")
+        ):
+            st.session_state.auto_update_holdings = auto_update
+            st.session_state.holdings_snapshot_date = snapshot_date_text
+            st.cache_data.clear()
+            st.session_state.refresh_token += 1
+            st.rerun()
+        st.caption("自动更新只估算净值涨跌带来的持仓变化；新增申购、赎回、手续费和现金分红仍需手动调整持仓。")
+    return snapshot_date_text, auto_update
+
+
 def main() -> None:
     inject_css()
+    render_compliance_footer()
     if "refresh_token" not in st.session_state:
         st.session_state.refresh_token = 0
     if "dashscope_api_key" not in st.session_state:
@@ -1360,6 +1979,10 @@ def main() -> None:
         st.session_state.holdings = default_holdings()
     else:
         st.session_state.holdings = normalize_holdings(st.session_state.holdings)
+    if "holdings_snapshot_date" not in st.session_state:
+        st.session_state.holdings_snapshot_date = default_snapshot_date()
+    if "auto_update_holdings" not in st.session_state:
+        st.session_state.auto_update_holdings = True
 
     st.sidebar.title("AI 智选基金助手")
     with st.sidebar.expander("设置", expanded=False):
@@ -1382,21 +2005,23 @@ def main() -> None:
             st.rerun()
         if st.session_state.dashscope_api_key:
             st.caption("已使用会话中的 DASHSCOPE_API_KEY。")
-        elif os.getenv("DASHSCOPE_API_KEY"):
-            st.caption("当前使用系统环境变量 DASHSCOPE_API_KEY。")
+        elif get_dashscope_api_key():
+            st.caption("当前使用已配置的 DASHSCOPE_API_KEY。")
         else:
             st.caption("未配置 Key，将使用本地 mock 建议。")
 
     render_holdings_editor()
+    snapshot_date, auto_update_holdings = render_holding_snapshot_settings()
 
-    score_range = st.sidebar.slider("综合评分范围", 1.0, 10.0, (1.0, 10.0), 0.1)
+    score_range = st.sidebar.slider("综合评分范围", 0.0, 10.0, (0.0, 10.0), 0.1)
     fund_type = st.sidebar.selectbox("基金类型", list(TYPE_KEYWORDS.keys()))
 
     holdings_json = holdings_to_json(st.session_state.holdings)
     with st.spinner("数据加载中，请稍候..."):
-        base_rows = load_data(st.session_state.refresh_token, holdings_json)
+        base_rows = load_data(st.session_state.refresh_token, holdings_json, snapshot_date, auto_update_holdings)
     render_manual_override_panel(base_rows)
     rows = apply_manual_overrides(base_rows)
+    require_mock_data_confirmation(rows)
     filtered_rows = filter_rows(rows, score_range, fund_type)
 
     st.sidebar.divider()
@@ -1425,7 +2050,15 @@ def main() -> None:
 
     st.title("AI 智选基金助手")
     st.caption("统一应用：数据获取、多维评分、通义千问建议、Markdown/HTML 导出都在本文件内完成。")
-    st.info("评分说明：收益能力中的近 1 年收益率按 -20% 到 20% 映射到 0-10 分，超过 20% 按 10 分封顶。")
+    st.info(
+        "评分说明：各指标在当前基金池内转换为 0-10 百分位分；收益能力优先看相对比较基准的超额收益；"
+        "权重按历史样本 IC/IR 估计，样本不足时回退默认权重。"
+    )
+    if auto_update_holdings:
+        updated_count = sum(1 for row in rows if row.get("持仓已自动更新"))
+        st.success(f"持仓已按 {snapshot_date} 快照净值自动更新到最新净值日期，共更新 {updated_count} 只基金。")
+    else:
+        st.caption("当前未开启持仓自动更新，表格中的持有金额沿用录入快照。")
 
     if not filtered_rows:
         st.warning("当前筛选条件下没有基金。请调整评分范围或基金类型。")
@@ -1436,15 +2069,19 @@ def main() -> None:
     st.subheader("基金数据表格")
     table_df = build_table_df(filtered_rows)
     table_event = st.dataframe(
-        table_df,
+        table_df.style.apply(highlight_mock_rows, axis=1),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
         column_config={
             "当前持有收益率": st.column_config.NumberColumn("持有收益率(%)", format="%.2f"),
+            "快照持有金额": st.column_config.NumberColumn("快照金额", format="%.2f"),
+            "持仓快照日期": st.column_config.TextColumn("快照日期"),
             "近1月收益率": st.column_config.NumberColumn("近1月(%)", format="%.2f"),
             "近1年收益率": st.column_config.NumberColumn("近1年(%)", format="%.2f"),
+            "近1年超额收益率": st.column_config.NumberColumn("超额收益(%)", format="%.2f"),
+            "数据来源": st.column_config.TextColumn("数据来源"),
             "综合评分(0-10)": st.column_config.NumberColumn("综合评分", format="%.1f"),
             "AI建议": st.column_config.TextColumn("简短 AI 建议", width="large"),
         },
@@ -1471,7 +2108,8 @@ def main() -> None:
                 f"""
                 <div class="hint-card">
                   <strong>{row["基金名称"]}</strong>
-                  <div class="small-muted">类型：{row["基金类型"]} ｜ 数据来源：{row["数据来源"]} ｜ 最新净值日期：{row["最新净值日期"]}</div>
+                  <div class="small-muted">类型：{row["基金类型"]} ｜ 基准：{row.get("比较基准", "沪深300")} ｜ 数据来源：{row["数据来源"]} ｜ 最新净值日期：{row["最新净值日期"]}</div>
+                  <div class="small-muted">{row.get("持仓更新说明", "")}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
