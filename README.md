@@ -1,3 +1,4 @@
+
 # AI 智选基金助手
 
 > 基于 Streamlit 和通义千问的个人基金投资分析系统  
@@ -15,17 +16,17 @@
 
 ### 1. 克隆仓库
 ```bash
-git clone (https://github.com/MAHONGHAO1/AI-/new/main?filename=README.md)
+git clone https://github.com/你的用户名/AI-Fund-Assistant.git
 cd AI-Fund-Assistant
 ```
 
-### 2. 安装依赖（自动安装，也可手动）
+### 2. 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
-或使用清华镜像加速：
+如需启用 AkShare 数据源，可额外安装：
 ```bash
-pip install streamlit pandas numpy requests plotly openai lxml tabulate akshare -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install akshare
 ```
 
 ### 3. 运行应用
@@ -39,20 +40,30 @@ streamlit run ai_investment_advisor.py
 - 在侧边栏「设置」中输入你的 `DASHSCOPE_API_KEY`，即可启用真实 AI 建议
 - 不配置时自动使用本地 mock 建议，不影响核心功能
 
+## ☁️ 部署到 Streamlit Cloud
+
+1. 将 `ai_investment_advisor.py`、`requirements.txt`、`README.md` 推送到 GitHub 仓库根目录。
+2. 在 Streamlit Cloud 新建应用，入口文件选择 `ai_investment_advisor.py`。
+3. Python 版本建议选择 `3.12`。
+4. 如需云端启用通义千问，在应用的 Secrets 中添加：
+```toml
+DASHSCOPE_API_KEY = "你的 API Key"
+```
+
 ## 🧱 技术栈
 
 - **前端/交互**：Streamlit, Plotly
 - **数据处理**：Pandas, NumPy, Requests
 - **数据源**：AkShare, 东方财富公开接口
 - **AI 模型**：通义千问（qwen-plus / qwen-max），兼容 OpenAI SDK
-- **语言**：Python 3.14
+- **语言**：Python 3.12+
 
 ## 📂 文件结构
 
 ```
 .
 ├── ai_investment_advisor.py   # 主程序（含所有功能）
-├── requirements.txt           # 依赖列表
+├── requirements.txt           # Streamlit Cloud 构建依赖
 ├── README.md                  # 本文件
 └── output/                    # 生成的报告默认保存在桌面
 ```
@@ -60,7 +71,7 @@ streamlit run ai_investment_advisor.py
 ## 📝 注意事项
 
 - 数据均来自公开接口，仅供个人学习与研究，不构成投资建议。
-- 首次运行会自动安装依赖，请保持网络畅通。
+- 部署到 Streamlit Cloud 时，依赖必须写入 `requirements.txt`，不要在应用运行时自动安装。
 - 部分基金接口有访问频率限制，代码已内置重试与降级机制。
 - 如需长期使用，建议申请自己的通义千问 API Key（免费额度足够个人使用）。
 
@@ -72,11 +83,11 @@ streamlit run ai_investment_advisor.py
 - [ ] 部署到 Streamlit Cloud 提供在线演示
 
 
-
 ## 👤 作者
 
 麻洪豪  
 - 邮箱：3438519642@qq.com  
+
 ## 🙏 致谢
 
 - [AkShare](https://www.akshare.xyz/) 提供金融数据接口
